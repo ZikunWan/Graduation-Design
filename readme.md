@@ -116,30 +116,14 @@
 | `FedTGP` | [client/clienttgp.py](./client/clienttgp.py) | [server/servertgp.py](./server/servertgp.py) | 用可学习的原型生成器替代静态均值原型，并通过 margin 约束增强类间可分性。 |
 | `FD` | [client/clientfd.py](./client/clientfd.py) | [server/serverfd.py](./server/serverfd.py) | 只通信类别级 logit，服务器做类 logit 聚合形成 teacher，客户端做蒸馏+监督联合训练。 |
 | `FedAMM` | [client/clientamm.py](./client/clientamm.py) | [server/serveramm.py](./server/serveramm.py) | 以“模态组合-类别”原型为通信单元，同时做模态平衡与组合对齐，重点处理缺失模态场景。 |
-| `PEPSY` | [client/clientpepsy.py](./client/clientpepsy.py) | [server/serverpepsy.py](./server/serverpepsy.py) | 使用缺失模式控制向量重配置本地表征，并在服务器端聚合同类缺失模式。 |
 | `FedMM` | [client/clientmm.py](./client/clientmm.py) | [server/servermm.py](./server/servermm.py) | 按模态拆分特征提取器，客户端只训练自己拥有的模态，并用全局原型正则化。 |
-| `FedNorm` | [client/clientnorm.py](./client/clientnorm.py) | [server/servernorm.py](./server/servernorm.py) | 使用模态专属归一化与本地统计量缓解不同模态带来的特征分布差异。 |
 
 ## 缺失模态 Baseline 规划
 1. 当前任务关注“不同客户端模态不同”的脑肿瘤图像分类，并同时允许 2D / 3D 模型架构异构。
 2. 因为 2D / 3D backbone 参数结构不同，缺失模态 baseline 不跨架构做 backbone 参数聚合。
-3. 各方法统一使用本地私有模型提取特征，再通过统一维度的 embedding / prototype / control / normalization 模块比较缺失模态处理能力。
+3. 各方法统一使用本地私有模型提取特征，再通过 embedding / prototype 级通信比较缺失模态处理能力。
 4. `FedMEMA` 暂不作为 baseline，因为当前设定下没有服务器端完整模态数据，无法公平构造原方法依赖的 multimodal anchors。
-
-### PEPSY
-1. 保留 `Missing-pattern embedding controls`：
-   - 为每个样本或客户端的可用模态组合构造缺失模式表示。
-   - 例如 `t1+t2w`、`t1c+t2f`、`t1` 都对应不同的 missing pattern。
-2. 保留 `Representation reconfiguration`：
-   - 客户端先用本地 2D / 3D backbone 提取特征。
-   - 再用缺失模式控制向量对本地 embedding 做重配置，使缺失模态条件下的表征尽量接近更完整的多模态表征。
-3. 保留 `Control aggregation / clustering`：
-   - 客户端上传缺失模式控制向量或其统计信息。
-   - 服务器端对相似缺失模式进行聚合或聚类，而不是直接平均异构 backbone 参数。
-4. 保留 `Contrastive alignment`：
-   - 对相同类别、相近模态组合或完整/不完整模态视角下的 embedding 做对比约束。
-   - 目标是让缺失模态样本的表示与语义一致的多模态表示靠近。
-5. 不使用跨 2D / 3D 的 backbone FedAvg。
+5. `PEPSY` 暂不作为 baseline，因为当前阶段不使用该方法。
 
 ### FedAMM
 1. 保留 `Intra-client modality balance`：
@@ -168,18 +152,14 @@
    - 分类器可以本地保留，以适应标签空间和模型结构差异。
 4. 保留 `Global prototype regularization`：
    - 服务器端维护 `(modality, class)` 级别的全局 prototype。
-   - 客户端用本地同模态同类别 embedding 对齐全局 prototype。
-5. 同一模态的 extractor 参数不跨 2D / 3D 聚合；跨架构只共享 prototype 级知识。
-
-### FedNorm
-1. 保留 `Modality-specific normalization`：
-   - 为 `t1`、`t1c`、`t2w`、`t2f` 分别维护模态专属归一化参数或归一化路径。
-   - 用不同归一化统计吸收 MRI 序列之间的分布差异。
-2. 保留 `Local normalization statistics`：
-   - 客户端保留本地 normalization statistics，类似 FedBN / FedNorm 的本地统计策略。
-   - 服务器不强行合并不同客户端、不同模态、不同维度模型产生的归一化统计。
-3. FedNorm 不直接补全缺失模态，主要作为弱 baseline 或消融项，用于验证仅靠模态归一化是否足以缓解模态异质性。
-4. 不使用跨 2D / 3D 的共享 backbone 参数聚合。
+   - 客户端直接使用第 \(k\) 个模态 extractor 输出的 feature embedding 作为 \(h_i^{(k)}\)，不额外使用 prototype head。
+   - 客户端本地同模态同类别 embedding 对齐全局 prototype。
+   - 每个客户端先计算本地 `(class, modality)` prototype，服务器端再对各客户端上传的同一 `(class, modality)` prototype 做 client-level 平均。
+5. 保留原文动态损失：
+   - 用 $\lambda(t)=1/(1+\exp(-\alpha(t-t_0)))$ 在训练早期强调分类损失，后期逐步强调全局 prototype 的 L2 对齐损失。
+   - prototype 正则项采用 $\beta\lambda(t)L_{proto}/D$，其中 $\beta$ 在分子上，$D$ 是 prototype 维度。
+   - 当前分类项将原文的 `BCE` 替换为多分类任务的 `CE`。
+6. 同一模态的 extractor 参数不跨 2D / 3D 聚合；跨架构只共享 prototype 级知识。
 
 ## 数据加载
 1. 使用 [dataset.py](./dataset.py) 自定义数据集与 `collate_fn`，不使用 `HtFLlib` 默认的 `npz -> x/y` 整包读取逻辑。

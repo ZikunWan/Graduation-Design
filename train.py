@@ -11,17 +11,13 @@ from server.serverproto import ServerFedProto
 from server.serverlg import ServerLGFedAvg
 from server.serverlocal import ServerLocal
 from server.serveramm import ServerFedAMM
-from server.serverpepsy import ServerPEPSY
 from server.servermm import ServerFedMM
-from server.servernorm import ServerFedNorm
 from server.servertgp import ServerFedTGP
 from server.serverfd import ServerFD
 
 ALGO_MAP = {
     "fedamm":    ServerFedAMM,
-    "pepsy":     ServerPEPSY,
     "fedmm":     ServerFedMM,
-    "fednorm":   ServerFedNorm,
     "fedgh":     ServerFedGH,
     "fedproto":  ServerFedProto,
     "lgfedavg":  ServerLGFedAvg,
@@ -124,7 +120,7 @@ def get_args():
     parser.add_argument("--model_name",    type=str,   default="resnet18",
                         choices=["resnet18", "resnet34", "resnet50"])
     parser.add_argument("--model_mode",    type=str,   default="auto",
-                        choices=["auto", "baseline", "multimodal", "pepsy", "amm", "mm", "norm"],
+                        choices=["auto", "baseline", "multimodal"],
                         help="auto selects the default model for each algorithm; multimodal is kept as an alias for AMM-style models")
     parser.add_argument("--num_classes",   type=int,   default=5)
     parser.add_argument("--prototype_dim", type=int,   default=256)
@@ -142,14 +138,12 @@ def get_args():
                         help="[FedAMM] Intra-client modality-balance loss weight")
     parser.add_argument("--amm_mc_lambda",        type=float, default=1.0,
                         help="[FedAMM] Inter-client modality-combination balance loss weight")
-    parser.add_argument("--pepsy_control_lambda", type=float, default=1.0,
-                        help="[PEPSY] Missing-pattern control alignment loss weight")
-    parser.add_argument("--pepsy_contrastive_lambda", type=float, default=0.2,
-                        help="[PEPSY] Supervised contrastive alignment loss weight")
-    parser.add_argument("--pepsy_temperature",    type=float, default=0.2,
-                        help="[PEPSY] Temperature for supervised contrastive alignment")
-    parser.add_argument("--fedmm_proto_lambda",   type=float, default=1.0,
-                        help="[FedMM] Per-modality global prototype regularization loss weight")
+    parser.add_argument("--fedmm_beta",           type=float, default=0.25,
+                        help="[FedMM] Beta for balancing prototype L2 and CE magnitudes")
+    parser.add_argument("--fedmm_alpha",          type=float, default=0.05,
+                        help="[FedMM] Sharpness of the dynamic lambda transition")
+    parser.add_argument("--fedmm_t0",             type=float, default=30.0,
+                        help="[FedMM] Transition round from CE-emphasis to prototype-emphasis")
     parser.add_argument("--margin_threshold",     type=float, default=1.0,
                         help="[FedTGP] Margin threshold for prototype separation")
     parser.add_argument("--early_stopping_patience", type=int, default=5,

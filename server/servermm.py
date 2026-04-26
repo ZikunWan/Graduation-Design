@@ -61,20 +61,14 @@ class ServerFedMM(Server):
 
 
 def aggregate_modality_prototypes(payloads):
-    weighted = defaultdict(list)
-    weights = defaultdict(list)
+    grouped = defaultdict(list)
     for payload in payloads:
         prototypes = payload.get("modality_prototypes", {})
-        counts = payload.get("modality_counts", {})
         for key, prototype in prototypes.items():
             modality, label = str(key[0]), int(key[1])
-            count = float(counts.get(key, 1.0))
-            weighted[(modality, label)].append(prototype.detach().cpu() * count)
-            weights[(modality, label)].append(count)
+            grouped[(modality, label)].append(prototype.detach().cpu())
 
     global_prototypes = {}
-    for key, prototypes in weighted.items():
-        total_weight = max(sum(weights[key]), 1.0)
-        prototype = torch.stack(prototypes, dim=0).sum(dim=0) / total_weight
-        global_prototypes[key] = torch.nn.functional.normalize(prototype, dim=0)
+    for key, prototypes in grouped.items():
+        global_prototypes[key] = torch.stack(prototypes, dim=0).mean(dim=0)
     return global_prototypes

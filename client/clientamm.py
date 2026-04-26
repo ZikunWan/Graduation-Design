@@ -43,26 +43,33 @@ class ClientFedAMM(Client):
                 proto_map[int(label)] = features[label_mask].mean(dim=0)
         return proto_map
 
-    def _modality_balance_loss(self, fused_feature, modality_features, modality_mask, labels):
-        teacher_prototypes = self._compute_proto_means(fused_feature, labels)
-        losses = []
-
+    def _modality_balance_loss(self, modality_features, modality_mask, labels):
+        modality_proto_maps = []
         for modality_index in range(modality_features.size(1)):
             active_mask = modality_mask[:, modality_index] > 0
             if not active_mask.any():
+                modality_proto_maps.append({})
                 continue
-            student_prototypes = self._compute_proto_means(
-                modality_features[:, modality_index, :],
-                labels,
-                sample_mask=active_mask,
+            modality_proto_maps.append(
+                self._compute_proto_means(
+                    modality_features[:, modality_index, :],
+                    labels,
+                    sample_mask=active_mask,
+                )
             )
-            for label, teacher_prototype in teacher_prototypes.items():
-                student_prototype = student_prototypes.get(label)
-                if student_prototype is not None:
-                    losses.append(F.mse_loss(student_prototype, teacher_prototype.detach()))
+
+        losses = []
+
+        for left_index in range(len(modality_proto_maps)):
+            for right_index in range(left_index + 1, len(modality_proto_maps)):
+                shared_labels = set(modality_proto_maps[left_index]) & set(modality_proto_maps[right_index])
+                for label in shared_labels:
+                    left_proto = modality_proto_maps[left_index][label]
+                    right_proto = modality_proto_maps[right_index][label]
+                    losses.append(F.mse_loss(left_proto, right_proto.detach()))
 
         if not losses:
-            return fused_feature.new_tensor(0.0)
+            return modality_features.new_tensor(0.0)
         return torch.stack(losses, dim=0).mean()
 
     def _combo_alignment_loss(self, fused_feature, modality_mask, labels):
@@ -148,7 +155,7 @@ class ClientFedAMM(Client):
                         modality_mask = outputs["modality_mask"]
 
                         cls_loss = self.loss_fn(logits, y)
-                        mb_loss = self._modality_balance_loss(fused_feature, modality_features, modality_mask, y)
+                        mb_loss = self._modality_balance_loss(modality_features, modality_mask, y)
                         mc_loss = self._combo_alignment_loss(fused_feature, modality_mask, y)
                         loss = cls_loss + self.amm_mb_lambda * mb_loss + self.amm_mc_lambda * mc_loss
 

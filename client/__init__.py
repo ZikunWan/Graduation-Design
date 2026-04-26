@@ -5,7 +5,5 @@ from .clientgh import ClientFedGH
 from .clientlg import ClientLGFedAvg
 from .clientlocal import ClientLocal
 from .clientmm import ClientFedMM
-from .clientnorm import ClientFedNorm
-from .clientpepsy import ClientPEPSY
 from .clientproto import ClientFedProto
 from .clienttgp import ClientFedTGP

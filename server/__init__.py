@@ -5,7 +5,5 @@ from .servergh import ServerFedGH
 from .serverlg import ServerLGFedAvg
 from .serverlocal import ServerLocal
 from .servermm import ServerFedMM
-from .servernorm import ServerFedNorm
-from .serverpepsy import ServerPEPSY
 from .serverproto import ServerFedProto
 from .servertgp import ServerFedTGP
