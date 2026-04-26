@@ -1,112 +1,3 @@
-import numpy as np
-import torch
-from sklearn.cluster import KMeans
-
-
-def to_numpy(x):
-    if torch.is_tensor(x):
-        return x.detach().cpu().numpy()
-    return np.asarray(x)
-
-
-def compute_per_modality_class_prototypes(
-    modality_prototypes,
-    labels,
-    modality_mask,
-    modality_order,
-    num_prototypes,
-    random_state=0,
-):
-    modality_prototypes_np = to_numpy(modality_prototypes)
-    labels_np = to_numpy(labels).astype(np.int64)
-    modality_mask_np = to_numpy(modality_mask).astype(np.float32)
-    class_ids = sorted(np.unique(labels_np).tolist())
-
-    prototypes = {}
-    for modality_index, modality in enumerate(modality_order):
-        prototypes[modality] = {}
-        active_index = modality_mask_np[:, modality_index] > 0
-
-        for class_id in class_ids:
-            class_index = labels_np == class_id
-            selected = modality_prototypes_np[active_index & class_index, modality_index]
-            if len(selected) == 0:
-                continue
-
-            num_clusters = min(num_prototypes, len(selected))
-            if num_clusters == 1:
-                centers = selected.mean(axis=0, keepdims=True)
-                counts = np.array([len(selected)], dtype=np.float32)
-            else:
-                kmeans = KMeans(n_clusters=num_clusters, random_state=random_state, n_init="auto")
-                cluster_ids = kmeans.fit_predict(selected)
-                centers = kmeans.cluster_centers_
-                counts = np.array([(cluster_ids == cluster_id).sum() for cluster_id in range(num_clusters)], dtype=np.float32)
-
-            prototypes[modality][int(class_id)] = {
-                "centers": torch.tensor(centers, dtype=torch.float32),
-                "counts": torch.tensor(counts, dtype=torch.float32),
-            }
-
-    return prototypes
-
-
-def build_prototype_tensor(
-    prototypes,
-    modality_order,
-    num_classes,
-    num_prototypes,
-    feature_dim,
-):
-    prototype_tensor = torch.zeros(
-        len(modality_order),
-        num_classes,
-        num_prototypes,
-        feature_dim,
-        dtype=torch.float32,
-    )
-    prototype_mask = torch.zeros(
-        len(modality_order),
-        num_classes,
-        num_prototypes,
-        dtype=torch.float32,
-    )
-    prototype_count = torch.zeros(
-        len(modality_order),
-        num_classes,
-        num_prototypes,
-        dtype=torch.float32,
-    )
-
-    for modality_index, modality in enumerate(modality_order):
-        for class_id, value in prototypes[modality].items():
-            centers = value["centers"]
-            counts = value["counts"]
-            count = min(num_prototypes, centers.shape[0])
-            prototype_tensor[modality_index, class_id, :count] = centers[:count]
-            prototype_mask[modality_index, class_id, :count] = 1.0
-            prototype_count[modality_index, class_id, :count] = counts[:count]
-
-    return prototype_tensor, prototype_mask, prototype_count
-
-
-def aggregate_global_prototypes(
-    prototype_tensors,
-    prototype_masks,
-    prototype_counts,
-):
-    prototype_tensors = torch.stack(prototype_tensors, dim=0)
-    prototype_masks = torch.stack(prototype_masks, dim=0)
-    prototype_counts = torch.stack(prototype_counts, dim=0)
-
-    weighted_tensors = prototype_tensors * prototype_counts.unsqueeze(-1)
-    global_prototype = weighted_tensors.sum(dim=(0, 3))
-    global_count = prototype_counts.sum(dim=(0, 3))
-    global_mask = (global_count > 0).float()
-    global_prototype = global_prototype / global_count.unsqueeze(-1)
-
-    return global_prototype, global_mask, global_count
-
 import json
 import os
 from pathlib import Path
@@ -114,6 +5,8 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
+import torch
 
 
 def _json_default(value):

@@ -1,55 +1,95 @@
 {
   "clients": {
     "BraTS": {
-      "val_round": [],
-      "val_accuracy": [],
-      "val_macro_f1": [],
-      "val_loss": [],
+      "val_round": [
+        0
+      ],
+      "val_accuracy": [
+        0.7093425605536332
+      ],
+      "val_macro_f1": [
+        0.6542181431010178
+      ],
+      "val_loss": [
+        1.3466585651813494
+      ],
       "test_round": [],
       "test_accuracy": [],
       "test_macro_f1": [],
       "test_loss": []
     },
     "Shanghai": {
-      "val_round": [],
-      "val_accuracy": [],
-      "val_macro_f1": [],
-      "val_loss": [],
+      "val_round": [
+        0
+      ],
+      "val_accuracy": [
+        0.7700729927007299
+      ],
+      "val_macro_f1": [
+        0.7669340463458111
+      ],
+      "val_loss": [
+        0.5695533896014638
+      ],
       "test_round": [],
       "test_accuracy": [],
       "test_macro_f1": [],
       "test_loss": []
     },
     "Figshare": {
-      "val_round": [],
-      "val_accuracy": [],
-      "val_macro_f1": [],
-      "val_loss": [],
+      "val_round": [
+        0
+      ],
+      "val_accuracy": [
+        0.4016393442622951
+      ],
+      "val_macro_f1": [
+        0.3787114845938375
+      ],
+      "val_loss": [
+        2.5135073153699032
+      ],
       "test_round": [],
       "test_accuracy": [],
       "test_macro_f1": [],
       "test_loss": []
     },
     "Brisc2025": {
-      "val_round": [],
-      "val_accuracy": [],
-      "val_macro_f1": [],
-      "val_loss": [],
+      "val_round": [
+        0
+      ],
+      "val_accuracy": [
+        0.524
+      ],
+      "val_macro_f1": [
+        0.5267206692160623
+      ],
+      "val_loss": [
+        1.2342328062057495
+      ],
       "test_round": [],
       "test_accuracy": [],
       "test_macro_f1": [],
       "test_loss": []
     }
   },
-  "val_accuracy": [],
-  "val_macro_f1": [],
-  "val_loss": [],
+  "val_accuracy": [
+    0.5937260902830911
+  ],
+  "val_macro_f1": [
+    0.5776395630481055
+  ],
+  "val_loss": [
+    1.3585724117378288
+  ],
   "test_accuracy": [],
   "test_macro_f1": [],
   "test_loss": [],
-  "round_elapsed_time": [],
-  "best_val_accuracy": null,
-  "best_round": null,
+  "round_elapsed_time": [
+    6826.649181127548
+  ],
+  "best_val_accuracy": 0.5937260902830911,
+  "best_round": 0,
   "early_stopped": false,
   "early_stopped_round": null
 }
