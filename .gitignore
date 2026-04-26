@@ -1,0 +1,25 @@
+# Python cache and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Training outputs and large local artifacts
+checkpoints/
+plots/
+*.pth
+*.pt
+*.ckpt
+*.npz
+
+# Local/editor metadata
+.codex
+.vscode/
+
+# External/reference repositories kept separately
+FedAMM/
+PEPSY/

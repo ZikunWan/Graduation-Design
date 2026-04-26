@@ -1,0 +1,55 @@
+{
+  "clients": {
+    "BraTS": {
+      "val_round": [],
+      "val_accuracy": [],
+      "val_macro_f1": [],
+      "val_loss": [],
+      "test_round": [],
+      "test_accuracy": [],
+      "test_macro_f1": [],
+      "test_loss": []
+    },
+    "Shanghai": {
+      "val_round": [],
+      "val_accuracy": [],
+      "val_macro_f1": [],
+      "val_loss": [],
+      "test_round": [],
+      "test_accuracy": [],
+      "test_macro_f1": [],
+      "test_loss": []
+    },
+    "Figshare": {
+      "val_round": [],
+      "val_accuracy": [],
+      "val_macro_f1": [],
+      "val_loss": [],
+      "test_round": [],
+      "test_accuracy": [],
+      "test_macro_f1": [],
+      "test_loss": []
+    },
+    "Brisc2025": {
+      "val_round": [],
+      "val_accuracy": [],
+      "val_macro_f1": [],
+      "val_loss": [],
+      "test_round": [],
+      "test_accuracy": [],
+      "test_macro_f1": [],
+      "test_loss": []
+    }
+  },
+  "val_accuracy": [],
+  "val_macro_f1": [],
+  "val_loss": [],
+  "test_accuracy": [],
+  "test_macro_f1": [],
+  "test_loss": [],
+  "round_elapsed_time": [],
+  "best_val_accuracy": null,
+  "best_round": null,
+  "early_stopped": false,
+  "early_stopped_round": null
+}
