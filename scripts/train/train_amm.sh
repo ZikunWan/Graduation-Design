@@ -13,7 +13,7 @@ python train.py \
     --eval_gap      1 \
     --local_epochs  3 \
     --local_learning_rate 1e-3 \
-    --client_batch_size_map BraTS=8 Shanghai=16 Figshare=32 Brisc2025=32 \
+    --client_batch_size_map BraTS=8 Shanghai=64 Figshare=128 Brisc2025=128 \
     --val_ratio     0.1 \
     --model_name    resnet18 \
     --model_mode    multimodal \
@@ -23,8 +23,7 @@ python train.py \
     --save_total_limit 2 \
     --save_dir      checkpoints/fedamm \
     --algo          fedamm \
-    --brats_ddp \
-    --client_gpu_map "BraTS=3,4,5,6,7" Shanghai=0 Figshare=1 Brisc2025=2 \
+    --client_gpu_map "BraTS=4,5,6,7" "Shanghai=2,3" Figshare=0 Brisc2025=1 \
     --amm_mb_lambda 1.0 \
     --amm_mc_lambda 1.0 \
     --server_early_stopping_patience 10 \

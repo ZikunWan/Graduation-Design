@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from .clientbase import Client
+from .clientmm import _move_optimizer_state_to_param_devices
 
 
 class ClientFedAMM(Client):
@@ -15,6 +16,47 @@ class ClientFedAMM(Client):
         self.global_combo_prototypes = {}
         self.local_combo_prototypes = {}
         self.local_combo_counts = {}
+
+    def _model_parallel_devices(self):
+        if self.device.type != "cuda":
+            return []
+        if self.brats_ddp_devices is None:
+            return []
+        device_ids = self._resolve_brats_ddp_devices()
+        if len(device_ids) <= 1:
+            return []
+        return [torch.device(f"cuda:{device_id}") for device_id in device_ids]
+
+    def _should_use_model_parallel(self):
+        return len(self._model_parallel_devices()) > 1
+
+    def _should_use_brats_ddp(self):
+        return False
+
+    def activate(self):
+        if not self.enable_model_offload or self.is_model_materialized:
+            if self._should_use_model_parallel() and hasattr(self.model, "configure_model_parallel"):
+                self.model.configure_model_parallel(self._model_parallel_devices())
+                _move_optimizer_state_to_param_devices(self.optimizer)
+            return
+
+        if self._should_use_model_parallel() and hasattr(self.model, "configure_model_parallel"):
+            self.model.configure_model_parallel(self._model_parallel_devices())
+            _move_optimizer_state_to_param_devices(self.optimizer)
+            self.is_model_materialized = True
+            return
+
+        super().activate()
+
+    def offload(self):
+        if not self.enable_model_offload or not self.is_model_materialized:
+            return
+        cpu_device = torch.device("cpu")
+        self.model.to(cpu_device)
+        _move_optimizer_state_to_param_devices(self.optimizer)
+        self.is_model_materialized = False
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def set_parameters(self, payload):
         if payload is None:
@@ -28,48 +70,66 @@ class ClientFedAMM(Client):
 
     def _mask_to_combo_id(self, modality_mask_row):
         combo_id = 0
-        for bit_index, value in enumerate(modality_mask_row.detach().cpu().tolist()):
+        if torch.is_tensor(modality_mask_row):
+            modality_mask_row = modality_mask_row.detach().cpu().tolist()
+        for bit_index, value in enumerate(modality_mask_row):
             if value > 0:
                 combo_id |= 1 << bit_index
         return int(combo_id)
 
-    def _compute_proto_means(self, features, labels, sample_mask=None):
-        proto_map = {}
-        for label in labels.unique(sorted=True).tolist():
-            label_mask = labels == int(label)
-            if sample_mask is not None:
-                label_mask = label_mask & sample_mask
-            if label_mask.any():
-                proto_map[int(label)] = features[label_mask].mean(dim=0)
-        return proto_map
+    def _model_module(self):
+        return self.model.module if hasattr(self.model, "module") else self.model
 
-    def _modality_balance_loss(self, modality_features, modality_mask, labels):
-        modality_proto_maps = []
-        for modality_index in range(modality_features.size(1)):
-            active_mask = modality_mask[:, modality_index] > 0
-            if not active_mask.any():
-                modality_proto_maps.append({})
-                continue
-            modality_proto_maps.append(
-                self._compute_proto_means(
-                    modality_features[:, modality_index, :],
-                    labels,
-                    sample_mask=active_mask,
-                )
-            )
+    def _move_to_device(self, batch):
+        if not isinstance(batch, dict) or "modalities" not in batch:
+            return super()._move_to_device(batch)
+
+        model = self._model_module()
+        modality_devices = getattr(model, "modality_devices", {})
+        moved_batch = {}
+        for key, value in batch.items():
+            if key == "modalities":
+                moved_batch[key] = {
+                    modality: tensor.to(
+                        modality_devices.get(modality, self.device),
+                        non_blocking=self.pin_memory,
+                    )
+                    for modality, tensor in value.items()
+                }
+            elif torch.is_tensor(value):
+                moved_batch[key] = value.to(self.device, non_blocking=self.pin_memory)
+            else:
+                moved_batch[key] = super()._move_to_device(value)
+        return moved_batch
+
+    def _modality_balance_loss(self, fused_feature, modality_features, modality_mask, labels):
+        active_modality_count = modality_mask.sum(dim=1)
+        multimodal_sample_mask = active_modality_count > 1
+        if not multimodal_sample_mask.any():
+            return fused_feature.new_tensor(0.0)
+
+        model = self._model_module()
+        if not hasattr(model, "project_amm_unimodal_embeddings"):
+            raise RuntimeError("FedAMM modality-balance loss requires AMMModel.")
 
         losses = []
+        for label in labels.unique(sorted=True).tolist():
+            label_mask = labels == int(label)
+            multimodal_label_mask = label_mask & multimodal_sample_mask
+            if not multimodal_label_mask.any():
+                continue
 
-        for left_index in range(len(modality_proto_maps)):
-            for right_index in range(left_index + 1, len(modality_proto_maps)):
-                shared_labels = set(modality_proto_maps[left_index]) & set(modality_proto_maps[right_index])
-                for label in shared_labels:
-                    left_proto = modality_proto_maps[left_index][label]
-                    right_proto = modality_proto_maps[right_index][label]
-                    losses.append(F.mse_loss(left_proto, right_proto.detach()))
+            multimodal_prototype = fused_feature[multimodal_label_mask].mean(dim=0)
+            for modality_index in range(modality_features.size(1)):
+                unimodal_label_mask = label_mask & (modality_mask[:, modality_index] > 0)
+                if not unimodal_label_mask.any():
+                    continue
+                unimodal_prototype = modality_features[unimodal_label_mask, modality_index, :].mean(dim=0)
+                projected_unimodal = model.project_amm_unimodal_embeddings(unimodal_prototype)
+                losses.append(F.mse_loss(projected_unimodal, multimodal_prototype.detach()))
 
         if not losses:
-            return modality_features.new_tensor(0.0)
+            return fused_feature.new_tensor(0.0)
         return torch.stack(losses, dim=0).mean()
 
     def _combo_alignment_loss(self, fused_feature, modality_mask, labels):
@@ -77,7 +137,9 @@ class ClientFedAMM(Client):
             return fused_feature.new_tensor(0.0)
 
         grouped = defaultdict(list)
-        for feature, label, mask_row in zip(fused_feature, labels.detach().cpu().tolist(), modality_mask):
+        labels_list = labels.detach().cpu().tolist()
+        modality_mask_list = modality_mask.detach().cpu().tolist()
+        for feature, label, mask_row in zip(fused_feature, labels_list, modality_mask_list):
             combo_id = self._mask_to_combo_id(mask_row)
             if combo_id > 0:
                 grouped[(combo_id, int(label))].append(feature)
@@ -88,7 +150,11 @@ class ClientFedAMM(Client):
             if global_prototype is None:
                 continue
             local_prototype = torch.stack(features, dim=0).mean(dim=0)
-            losses.append(F.mse_loss(local_prototype, global_prototype.to(self.device)))
+            target_prototype = global_prototype.detach().to(
+                device=fused_feature.device,
+                dtype=local_prototype.dtype,
+            )
+            losses.append(F.mse_loss(local_prototype, target_prototype))
 
         if not losses:
             return fused_feature.new_tensor(0.0)
@@ -97,7 +163,7 @@ class ClientFedAMM(Client):
     def collect_local_prototypes(self):
         trainloader = self.load_train_data(shuffle=False)
         self.model.eval()
-        grouped_features = defaultdict(list)
+        grouped_sums = {}
         grouped_counts = defaultdict(int)
 
         with torch.no_grad():
@@ -107,18 +173,21 @@ class ClientFedAMM(Client):
                 with self.autocast_context():
                     outputs = self.model(x, return_dict=True)
                 fused_feature = outputs["fused_feature"].detach().cpu()
-                modality_mask = outputs["modality_mask"].detach().cpu()
-                for feature, label, mask_row in zip(fused_feature, y.detach().cpu().tolist(), modality_mask):
+                modality_mask = outputs["modality_mask"].detach().cpu().tolist()
+                labels = y.detach().cpu().tolist()
+                for feature, label, mask_row in zip(fused_feature, labels, modality_mask):
                     combo_id = self._mask_to_combo_id(mask_row)
                     if combo_id <= 0:
                         continue
                     key = (combo_id, int(label))
-                    grouped_features[key].append(feature)
+                    if key not in grouped_sums:
+                        grouped_sums[key] = torch.zeros_like(feature)
+                    grouped_sums[key] += feature
                     grouped_counts[key] += 1
 
         self.local_combo_prototypes = {
-            key: torch.stack(features, dim=0).mean(dim=0)
-            for key, features in grouped_features.items()
+            key: feature_sum / max(grouped_counts[key], 1)
+            for key, feature_sum in grouped_sums.items()
         }
         self.local_combo_counts = dict(grouped_counts)
         return self.local_combo_prototypes
@@ -155,7 +224,7 @@ class ClientFedAMM(Client):
                         modality_mask = outputs["modality_mask"]
 
                         cls_loss = self.loss_fn(logits, y)
-                        mb_loss = self._modality_balance_loss(modality_features, modality_mask, y)
+                        mb_loss = self._modality_balance_loss(fused_feature, modality_features, modality_mask, y)
                         mc_loss = self._combo_alignment_loss(fused_feature, modality_mask, y)
                         loss = cls_loss + self.amm_mb_lambda * mb_loss + self.amm_mc_lambda * mc_loss
 

@@ -36,163 +36,6 @@ def build_resnet_feature_extractor(model_name, spatial_dims, n_input_channels):
     return feature_extractor, backbone.avgpool, backbone.fc.in_features
 
 
-class AMMModel(nn.Module):
-    """Modality-specific encoders, multimodal fusion, and prototype outputs."""
-
-    def __init__(
-        self,
-        client_name,
-        num_classes=5,
-        model_name="resnet18",
-        prototype_dim=256,
-        dropout=0.0,
-    ):
-        super().__init__()
-        self.client_name = client_name
-        self.client_spec = get_client_spec(client_name)
-        self.is_3d = self.client_spec["is_3d"]
-        self.spatial_dims = 3 if self.is_3d else 2
-        self.modalities = list(GLOBAL_MODALITIES)
-        self.client_modalities = list(self.client_spec["modalities"])
-        self.prototype_dim = prototype_dim
-
-        self.modality_extractors = nn.ModuleDict()
-        backbone_dim = None
-        for modality in self.client_modalities:
-            feature_extractor, global_pool, feature_dim = build_resnet_feature_extractor(
-                model_name,
-                self.spatial_dims,
-                n_input_channels=1,
-            )
-            self.modality_extractors[modality] = feature_extractor
-            if backbone_dim is None:
-                backbone_dim = feature_dim
-                self.global_pool = global_pool
-
-        self.backbone_dim = backbone_dim
-        self.fused_dim = backbone_dim * len(self.client_modalities)
-        self.dropout = nn.Dropout(dropout)
-        self.classifier = nn.Linear(self.fused_dim, num_classes)
-        self.modality_prototype_heads = nn.ModuleDict(
-            {
-                modality: nn.Sequential(
-                    nn.Linear(backbone_dim, prototype_dim),
-                    nn.ReLU(inplace=True),
-                    nn.Dropout(dropout),
-                )
-                for modality in self.client_modalities
-            }
-        )
-
-    def _runtime_dtype(self, device):
-        if device.type == "cuda" and torch.is_autocast_enabled():
-            return torch.get_autocast_dtype("cuda")
-        return self.classifier.weight.dtype
-
-    def _encode_one_modality(self, modality, tensor):
-        feature_map = self.modality_extractors[modality](tensor)
-        feature_map = self.global_pool(feature_map)
-        return torch.flatten(feature_map, 1)
-
-    def extract_modality_features(self, x):
-        modality_mask = x["modality_mask"]
-        batch_size = modality_mask.shape[0]
-        feature_dtype = self._runtime_dtype(modality_mask.device)
-        features = []
-
-        for modality_index, modality in enumerate(self.modalities):
-            feature = torch.zeros(
-                batch_size,
-                self.backbone_dim,
-                device=modality_mask.device,
-                dtype=feature_dtype,
-            )
-            if modality in self.modality_extractors and modality in x["modalities"]:
-                active_index = modality_mask[:, modality_index] > 0
-                if active_index.any():
-                    encoded = self._encode_one_modality(modality, x["modalities"][modality][active_index])
-                    feature[active_index] = encoded.to(feature.dtype)
-            features.append(feature)
-
-        return torch.stack(features, dim=1), modality_mask
-
-    def fuse_features(self, modality_features, modality_mask):
-        del modality_mask
-        selected_features = []
-        for modality in self.client_modalities:
-            modality_index = self.modalities.index(modality)
-            selected_features.append(modality_features[:, modality_index, :])
-        fused_feature = torch.cat(selected_features, dim=1)
-        return self.dropout(fused_feature)
-
-    def extract_modality_prototypes(self, modality_features, modality_mask):
-        batch_size = modality_mask.shape[0]
-        prototype_dtype = self._runtime_dtype(modality_features.device)
-        prototypes = []
-
-        for modality_index, modality in enumerate(self.modalities):
-            prototype = torch.zeros(
-                batch_size,
-                self.prototype_dim,
-                device=modality_features.device,
-                dtype=prototype_dtype,
-            )
-            if modality in self.modality_prototype_heads:
-                active_index = modality_mask[:, modality_index] > 0
-                if active_index.any():
-                    active_feature = modality_features[active_index, modality_index]
-                    active_prototype = self.modality_prototype_heads[modality](active_feature)
-                    prototype[active_index] = active_prototype.to(prototype.dtype)
-            prototypes.append(prototype)
-
-        return torch.stack(prototypes, dim=1)
-
-    def encode(self, x):
-        modality_features, modality_mask = self.extract_modality_features(x)
-        fused_feature = self.fuse_features(modality_features, modality_mask)
-        return {
-            "modality_features": modality_features,
-            "modality_mask": modality_mask,
-            "fused_feature": fused_feature,
-        }
-
-    def forward(self, x, return_prototype=False, return_feature=False, return_dict=False):
-        encoded = self.encode(x)
-        fused_feature = encoded["fused_feature"]
-        logits = self.classifier(fused_feature)
-
-        if return_dict:
-            output = {
-                "logits": logits,
-                **encoded,
-            }
-            if return_prototype:
-                output["modality_prototypes"] = self.extract_modality_prototypes(
-                    encoded["modality_features"],
-                    encoded["modality_mask"],
-                )
-            return output
-
-        if return_prototype and return_feature:
-            modality_prototypes = self.extract_modality_prototypes(
-                encoded["modality_features"],
-                encoded["modality_mask"],
-            )
-            return logits, fused_feature, modality_prototypes, encoded["modality_mask"]
-
-        if return_prototype:
-            modality_prototypes = self.extract_modality_prototypes(
-                encoded["modality_features"],
-                encoded["modality_mask"],
-            )
-            return logits, modality_prototypes, encoded["modality_mask"]
-
-        if return_feature:
-            return logits, fused_feature
-
-        return logits
-
-
 class MMModel(nn.Module):
     """Per-modality extractor decomposition with local fusion/classifier."""
 
@@ -344,6 +187,51 @@ class MMModel(nn.Module):
         return logits
 
 
+class AMMModel(MMModel):
+    """FedAMM model with a projection head for prototype-level modality balance."""
+
+    def __init__(
+        self,
+        client_name,
+        num_classes=5,
+        model_name="resnet18",
+        prototype_dim=256,
+        dropout=0.0,
+    ):
+        super().__init__(
+            client_name=client_name,
+            num_classes=num_classes,
+            model_name=model_name,
+            prototype_dim=prototype_dim,
+            dropout=dropout,
+        )
+        self.amm_unimodal_projection = self._build_amm_projection_head(
+            input_dim=self.backbone_dim,
+            output_dim=self.fused_dim,
+            hidden_dim=prototype_dim,
+        )
+
+    def _build_amm_projection_head(self, input_dim, output_dim, hidden_dim):
+        if input_dim == output_dim:
+            return nn.Identity()
+        hidden_dim = int(hidden_dim)
+        if hidden_dim <= 0:
+            return nn.Linear(input_dim, output_dim)
+        return nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, output_dim),
+        )
+
+    def configure_model_parallel(self, devices):
+        super().configure_model_parallel(devices)
+        if self.output_device is not None:
+            self.amm_unimodal_projection.to(self.output_device)
+
+    def project_amm_unimodal_embeddings(self, modality_features):
+        return self.amm_unimodal_projection(modality_features)
+
+
 class BaselineBrainTumorModel(nn.Module):
     def __init__(
         self,
@@ -422,6 +310,8 @@ def resolve_model_mode(model_mode, algo):
     if model_mode != "auto":
         if model_mode == "multimodal":
             return MODALITY_MISSING_BASELINE_ALGOS.get(algo, "amm")
+        if model_mode == "amm":
+            return "amm"
         return model_mode
     if algo in BASELINE_ALGOS:
         return "baseline"
