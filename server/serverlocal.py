@@ -274,7 +274,10 @@ class ServerLocal(Server):
             client.early_stopped_round = client_history.get("early_stopped_round")
 
         round_idx = checkpoint.get("round_idx", 0)
+        self.resume_round_idx = int(round_idx)
         logger.info("Successfully loaded checkpoint from %s (Round %d)", load_path, round_idx)
+        logger.info("Resuming training from round %d", self.resume_round_idx + 1)
+        self._refresh_saved_checkpoints()
         return round_idx
 
     def aggregate(self, active_clients):
@@ -457,12 +460,13 @@ class ServerLocal(Server):
         self.maybe_save_checkpoint(round_idx)
 
     def _train_single_client(self, client, client_idx):
-        last_round_idx = -1
+        start_round = self.get_resume_start_round()
+        last_round_idx = self.get_last_completed_round()
         assigned_gpu_ids = self._client_gpu_assignments.get(client.client_name, ())
         assignment_label = ",".join(str(gpu_id) for gpu_id in assigned_gpu_ids) if assigned_gpu_ids else "cpu"
         logger.info("Training local client %s on %s", client.client_name, assignment_label)
         try:
-            for round_idx in range(self.global_rounds):
+            for round_idx in range(start_round, self.global_rounds):
                 last_round_idx = round_idx
                 client.activate()
                 try:

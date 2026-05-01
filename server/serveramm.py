@@ -44,8 +44,9 @@ class ServerFedAMM(Server):
 
     def train(self):
         self._start_training_timer()
-        last_round_idx = -1
-        for round_idx in range(self.global_rounds):
+        start_round = self.get_resume_start_round()
+        last_round_idx = self.get_last_completed_round()
+        for round_idx in range(start_round, self.global_rounds):
             last_round_idx = round_idx
             self.train_round(round_idx)
             if self.should_stop_training():

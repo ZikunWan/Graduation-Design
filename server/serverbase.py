@@ -90,6 +90,10 @@ class Server:
         self.training_start_time = None
         self._effective_client_gpu_assignments = {}
         self._effective_client_batch_sizes = {}
+        self.resume_round_idx = None
+
+        if self.save_dir:
+            self._refresh_saved_checkpoints()
 
     def _parse_client_gpu_map(self):
         entries = getattr(self.args, "client_gpu_map", None) or []
@@ -219,6 +223,27 @@ class Server:
         if self.training_start_time is None:
             return 0.0
         return float(time.time() - self.training_start_time)
+
+    def _checkpoint_sort_key(self, path):
+        name = os.path.basename(path)
+        stem, _ = os.path.splitext(name)
+        try:
+            return int(stem.rsplit("_", 1)[-1])
+        except ValueError:
+            return -1
+
+    def _refresh_saved_checkpoints(self):
+        pattern = os.path.join(self.save_dir, "checkpoint_round_*.pth")
+        self.saved_checkpoints = sorted(glob.glob(pattern), key=self._checkpoint_sort_key)
+
+    def get_resume_start_round(self):
+        if self.resume_round_idx is None:
+            return 0
+        return int(self.resume_round_idx) + 1
+
+    def get_last_completed_round(self):
+        start_round = self.get_resume_start_round()
+        return start_round - 1 if start_round > 0 else -1
 
 
     def _ensure_client_history(self):
@@ -663,7 +688,7 @@ class Server:
         torch.save(checkpoint, save_path)
         logger.info("Checkpoint saved to %s", save_path)
 
-        self.saved_checkpoints.append(save_path)
+        self._refresh_saved_checkpoints()
 
         while len(self.saved_checkpoints) > self.save_total_limit:
             old_ckpt = self.saved_checkpoints.pop(0)
@@ -702,7 +727,10 @@ class Server:
                 client.load_state(client_states[client.client_name])
 
         round_idx = checkpoint.get("round_idx", 0)
+        self.resume_round_idx = int(round_idx)
         logger.info("Successfully loaded checkpoint from %s (Round %d)", load_path, round_idx)
+        logger.info("Resuming training from round %d", self.resume_round_idx + 1)
+        self._refresh_saved_checkpoints()
         return round_idx
 
     def train_round(self, round_idx):

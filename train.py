@@ -27,7 +27,7 @@ ALGO_MAP = {
 }
 
 
-def get_args():
+def build_arg_parser():
     parser = argparse.ArgumentParser(
         description="Federated learning trainer",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -155,7 +155,11 @@ def get_args():
     parser.add_argument("--server_early_stopping_min_delta", type=float, default=0.0,
                         help="[Federated] Minimum aggregated validation-accuracy improvement required to reset early-stopping patience")
 
-    return parser.parse_args()
+    return parser
+
+
+def get_args():
+    return build_arg_parser().parse_args()
 
 
 def set_seed(seed: int):

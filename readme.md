@@ -97,15 +97,6 @@
 
 # 方法
 
-## 总体思路
-1. 问题设定同时包含：
-   - 模态缺失
-   - 标签空间不一致
-   - 2D / 3D 模型架构异构
-2. 不共享模型参数，只共享 Prototype。
-3. 服务器端维护 `(modality, class)` 级别的全局 Prototype 库。
-4. 客户端保留自己的本地模型，通过分类损失和 Prototype 对齐损失联合训练。
-
 ## Baseline 方法速览（client/server 对应）
 | 方法 | Client 实现 | Server 实现 | 核心 idea（只保留最核心） |
 | :-- | :-- | :-- | :-- |
@@ -161,98 +152,229 @@
    - 当前分类项将原文的 `BCE` 替换为多分类任务的 `CE`。
 6. 同一模态的 extractor 参数不跨 2D / 3D 聚合；跨架构只共享 prototype 级知识。
 
-## 数据加载
-1. 使用 [dataset.py](./dataset.py) 自定义数据集与 `collate_fn`，不使用 `HtFLlib` 默认的 `npz -> x/y` 整包读取逻辑。
-2. dataloader 按病例目录读取样本，每个样本返回其所有可用模态。
-3. 全局模态顺序统一定义为：
-   - `t1`
-   - `t1c`
-   - `t2w`
-   - `t2f`
-4. `collate_fn` 会输出：
-   - `modalities`
-   - `modality_mask`
-   - `full_modality_order`
-   - `sample_ids`
-5. `modality_mask` 的 shape 为 `[B, 4]`，用于指示每个样本实际拥有的模态。
+## 拟提出方法：模态感知融合与原型指导的分类头聚合
 
-## 模型结构
-1. 使用 [model.py](./model.py) 定义本地模型。
-2. 2D 客户端与 3D 客户端分别共享各自的一套 `MONAI ResNet` 主体结构，但都遵循同一个多模态框架。
-3. 模型采用“模态专属前端 + 共享后端”的设计：
-   - 每个模态有自己的前端分支，前端到 `layer2`
-   - `layer3 / layer4` 在同一个客户端内部共享
-4. 缺失模态在 sample 级别直接跳过，不会送入对应分支。
-5. 分类分支使用融合后的 backbone feature：
-   - 先对所有存在模态的 feature 做 mask-aware 平均
-   - 再经过分类头输出 `logits`
-6. Prototype 分支不使用融合后的单一 prototype，而是为每个模态单独生成 prototype feature。
+### 方法动机
+当前任务同时存在三类异构性：不同客户端的 MRI 模态不一致、标签空间不完全一致，并且 2D / 3D 客户端使用的模型结构不同。在这种设定下，直接聚合 backbone 参数容易把不同成像协议、不同空间维度和不同模态组合下学习到的低层表征混合在一起，从而引入负迁移。因此，本文不追求构建一个所有客户端共享的统一图像编码器，而是保留客户端私有的模态 encoder，并将联邦协同限制在更高层的语义空间中。
 
-## Local Prototype 生成
-1. 对一个 batch，模型输出：
-   - `logits`
-   - `modality_prototypes`
-   - `modality_mask`
-2. 其中 `modality_prototypes` 的 shape 为 `[B, 4, D_p]`，表示每个样本在每个模态上的 prototype feature。
-3. 客户端端按 `(modality, class)` 分组。
-4. 对每个 `(modality, class)` 组内部的样本 prototype feature 做 `K-Means`，得到多个 local prototypes。
-5. 每个 local prototype 同时记录其对应的 cluster size，后续上传给服务器。
-6. 使用 [utils.py](./utils.py) 完成：
-   - 本地 `K-Means` prototype 计算
-   - local prototype tensor 打包
-   - server 端全局 prototype 聚合
+已有 baseline 的结果也支持这一判断。一方面，`FedMM` 和 `FedAMM` 表明模态专属 encoder 与 prototype 级通信能够显式处理缺失模态；另一方面，`LG-FedAvg` 的强表现说明，在强异构场景中，分类头所表达的类别判别边界具有较高的跨客户端共享价值。基于这一观察，本文拟提出一种模态感知的联邦分类方法：客户端仍然训练本地模态 encoder，服务器不聚合 backbone，而是利用模态组合 prototype 指导分类头参数交换，使跨客户端知识共享同时作用于“类别语义中心”和“分类判别边界”。
 
-## Server Prototype Bank
-1. 服务器端的 Prototype 库按 `(modality, class)` 组织。
-2. 每个 `(modality, class)` 组合最终只维护一个全局 Prototype。
-3. 一个客户端在某个 `(modality, class)` 下可以上传多个 local prototypes。
-4. 服务器端对这些 local prototypes 做加权均值聚合，得到唯一的全局 Prototype。
-5. 权重由各 local prototype 对应的 cluster size 决定。
+该方法的核心思想可以概括为三点：
+1. 用 mask-aware gated fusion 替代简单 concat，使模型根据当前样本实际拥有的模态自适应融合特征。
+2. 用模态组合 prototype 描述不同缺失模态条件下的类别语义，并通过更完整模态组合向缺失模态组合提供语义监督。
+3. 用 prototype 的可靠性和模态完整度指导分类头聚合，使分类头交换不再是简单平均，而是类别级、模态感知的参数共享。
 
-## 损失函数
-1. 总损失由分类损失和 Prototype 对齐损失组成：
+### 模态感知特征融合
+对客户端 $k$ 的样本 $i$，设其可用模态集合为 $\mathcal{M}_i$。每个模态 $m$ 由对应的本地 encoder 提取特征：
 
-$$\mathcal{L} = \mathcal{L}_{cls} + \lambda_{proto}\mathcal{L}_{proto}$$
+$$
+h_{i,m}^{k}=E_{k,m}(x_{i,m})
+$$
 
+为避免不同客户端因可用模态数量不同而产生不同维度的 fused feature，先将每个模态特征投影到统一语义空间：
 
-2. 分类损失为标准交叉熵：
+$$
+u_{i,m}^{k}=P_{k,m}h_{i,m}^{k}\in \mathbb{R}^{D}
+$$
 
-$$\mathcal{L}_{cls} = \text{CE}(\text{logits}, y)$$
+随后根据模态特征、模态类型和当前样本的 modality mask 计算门控分数：
 
+$$
+s_{i,m}^{k}=a^\top \tanh(W_u u_{i,m}^{k}+W_e e_m+W_q q_i)
+$$
 
-3. Prototype 对齐损失定义为：
-   - 客户端 local prototype 对齐服务器对应 `(modality, class)` 的全局 Prototype
-   - 若一个 `(modality, class)` 组内有多个 local prototypes，则它们都去对齐同一个全局 Prototype
-4. 记：
-   - $p_{m,c,k}$ 表示客户端在模态 $m$、类别 $c$ 下第 $k$ 个 local prototype
-   - $g_{m,c}$ 表示服务器端对应的全局 Prototype
-   - $\delta_{m,c,k} \in \{0,1\}$ 表示该 local/global prototype 对是否同时有效
-   - $w_{m,c,k}$ 表示该 local prototype 的权重；若使用 cluster size 加权，则 $w_{m,c,k}=n_{m,c,k}$，否则 $w_{m,c,k}=1$
-5. 则 Prototype 对齐损失可写为：
+其中 $e_m$ 表示模态 embedding，$q_i$ 表示由 modality mask 得到的缺失模态状态编码。只在可用模态集合内归一化：
+
+$$
+\alpha_{i,m}^{k}
+=
+\frac{\exp(s_{i,m}^{k})}
+{\sum_{r\in\mathcal{M}_i}\exp(s_{i,r}^{k})}
+$$
+
+最终 fused feature 为：
+
+$$
+z_i^k=\sum_{m\in\mathcal{M}_i}\alpha_{i,m}^{k}u_{i,m}^{k}
+$$
+
+相比直接拼接不同模态特征，该融合方式具有两个优势：第一，所有客户端的分类头输入维度统一，便于后续进行分类头参数交换；第二，模型能够根据不同样本的模态缺失状态动态调整各模态贡献，而不是默认所有模态同等重要。
+
+### 模态组合 Prototype Bank
+服务器维护按 `(modality_combination, class)` 组织的全局 prototype bank。设 $s$ 表示一个模态组合，例如 `t1c`、`t1c+t2f` 或 `t1+t1c+t2w+t2f`。客户端 $k$ 在本地统计：
+
+$$
+p_{k,s,c}
+=
+\frac{1}{n_{k,s,c}}
+\sum_{i:y_i=c,\ \mathcal{M}_i=s} z_i^k
+$$
+
+其中 $n_{k,s,c}$ 表示客户端 $k$ 中属于类别 $c$ 且模态组合为 $s$ 的样本数。服务器端不是仅做普通样本数加权平均，而是引入 prototype 可靠性：
+
+$$
+\omega_{k,s,c}
+=
+n_{k,s,c}\cdot
+\exp(\cos(p_{k,s,c},G_{s,c}^{t})/\tau)
+$$
+
+并得到当前轮候选全局 prototype：
+
+$$
+\bar{G}_{s,c}^{t+1}
+=
+\frac{\sum_k \omega_{k,s,c}p_{k,s,c}}
+{\sum_k \omega_{k,s,c}}
+$$
+
+最终采用动量更新：
+
+$$
+G_{s,c}^{t+1}
+=
+(1-\mu)G_{s,c}^{t}
++
+\mu\bar{G}_{s,c}^{t+1}
+$$
+
+该设计的目的不是增加复杂通信，而是降低小样本客户端或噪声 prototype 对全局 prototype bank 的瞬时扰动，使服务器端语义中心随训练过程平滑演化。
+
+### 缺失模态的 Prototype 下发
+客户端接收 prototype 时，不只接收与自身模态组合完全一致的 $G_{s,c}$。对于缺失模态组合 $s$，服务器还可以利用包含 $s$ 的更完整模态组合 $s'$ 构造 teacher prototype：
+
+$$
+T_{s,c}
+=
+\lambda G_{s,c}
++
+(1-\lambda)
+\sum_{s'\supset s}\psi(s,s')G_{s',c}
+$$
+
+其中：
+
+$$
+\psi(s,s')
+=
+\frac{\exp(|s'|/\tau)}
+{\sum_{r\supset s}\exp(|r|/\tau)}
+$$
+
+这样，单模态客户端不需要生成缺失图像，也不需要补齐缺失输入，而是通过更完整模态组合的 prototype 获得语义监督。该机制保留了缺失模态方法的效率优势，同时使单模态表示能够向多模态语义空间靠近。
+
+### 原型指导的分类头聚合
+分类头仍保持一个普通线性层，不拆分为额外模块：
+
+$$
+\hat{y}_i=W_k z_i^k+b_k
+$$
+
+其中 $W_k\in\mathbb{R}^{C\times D}$，$b_k\in\mathbb{R}^{C}$。服务器按类别聚合分类头的第 $c$ 行：
+
+$$
+W_c^{t+1}=\sum_{k\in\mathcal{K}_c}\pi_{k,c}W_{k,c}^{t+1}
+$$
+
+$$
+b_c^{t+1}=\sum_{k\in\mathcal{K}_c}\pi_{k,c}b_{k,c}^{t+1}
+$$
+
+聚合权重由类别样本量、prototype 一致性和模态完整度共同决定：
+
+$$
+r_{k,c}
+=
+(n_{k,c}+\epsilon)^\gamma
+\cdot
+\exp(\rho_{k,c}/\tau_h)
+\cdot
+(1+\beta\eta_{k,c})
+$$
+
+$$
+\pi_{k,c}
+=
+\frac{r_{k,c}}
+{\sum_{j\in\mathcal{K}_c}r_{j,c}}
+$$
+
+其中 prototype 一致性为：
+
+$$
+\rho_{k,c}
+=
+\frac{
+\sum_s n_{k,s,c}\cos(p_{k,s,c},G_{s,c})
+}{
+\sum_s n_{k,s,c}
+}
+$$
+
+模态完整度为：
+
+$$
+\eta_{k,c}
+=
+\frac{
+\sum_s n_{k,s,c}|s|/M
+}{
+\sum_s n_{k,s,c}
+}
+$$
+
+这里 $M$ 是全局模态总数，$|s|$ 是模态组合 $s$ 中包含的模态数量。与 `LG-FedAvg` 的分类头简单平均相比，该策略仍然只交换轻量的线性分类头参数，但能够区分不同客户端在每个类别上的可靠性：样本更多、prototype 更接近全局语义中心、模态信息更完整的客户端，对该类别分类边界的贡献更大。
+
+### 训练目标
+为保持方法简洁，客户端本地训练只使用三类损失：
+
+$$
+\mathcal{L}
+=
+\mathcal{L}_{ce}
++
+\lambda_p\mathcal{L}_{proto}
++
+\lambda_h\mathcal{L}_{head}
+$$
+
+其中分类损失为：
+
+$$
+\mathcal{L}_{ce}
+=
+\text{CE}(W_k z_i^k+b_k,y_i)
+$$
+
+prototype 对齐损失为：
 
 $$
 \mathcal{L}_{proto}
 =
-\frac{
-\sum\limits_{m}\sum\limits_{c}\sum\limits_{k}
-\delta_{m,c,k}\, w_{m,c,k}
-\left(1-\cos\left(p_{m,c,k}, g_{m,c}\right)\right)
-}{
-\sum\limits_{m}\sum\limits_{c}\sum\limits_{k}
-\delta_{m,c,k}\, w_{m,c,k}
-}
+\|p_{k,s,c}-T_{s,c}\|_2^2
 $$
 
-6. 若不使用 cluster size 加权，则上式退化为对所有有效 prototype 对的 cosine distance 直接取平均。
-7. 当前实现中对齐损失采用 cosine distance，由 [loss.py](./loss.py) 给出。
+分类头语义校准损失为：
 
-## 训练与通信流程
-1. 客户端本地训练时，前向得到分类输出与模态级 prototype feature。
-2. 使用分类损失更新本地模型参数。
-3. 同时利用服务器下发的全局 Prototype 库计算 Prototype 对齐损失。
-4. 每轮本地训练结束后，客户端重新统计自己的 `(modality, class)` local prototypes。
-5. 客户端只上传 Prototype，不上传模型参数。
-6. 服务器聚合后更新全局 Prototype 库，再下发给客户端进入下一轮训练。
+$$
+\mathcal{L}_{head}
+=
+\text{CE}(W_k T_{s,c}+b_k,c)
+$$
+
+其中 $\mathcal{L}_{proto}$ 负责使本地融合特征靠近服务器端的模态组合语义中心，$\mathcal{L}_{head}$ 则进一步要求本地分类头能够正确识别这些全局语义 prototype。换言之，prototype 不仅作为表示层的对齐目标，也作为分类边界的校准样本。
+
+### 联邦训练流程
+每一轮通信包含以下步骤：
+1. 服务器向客户端下发当前全局分类头和 prototype bank。
+2. 客户端使用本地可用模态训练私有 encoder、gated fusion 模块和线性分类头。
+3. 客户端统计本地 `(modality_combination, class)` prototype，并上传 prototype、样本计数和分类头参数。
+4. 服务器先更新 prototype bank，再基于 prototype 可靠性与模态完整度聚合分类头。
+5. 更新后的 prototype bank 和分类头进入下一轮训练。
+
+因此，本文方法可以视为对 `FedAMM` 和 `LG-FedAvg` 的结合与扩展：`FedAMM` 提供模态组合级语义建模，`LG-FedAvg` 证明分类头共享在强异构场景中有效，而本文进一步用模态感知 prototype 指导分类头聚合，使共享的分类边界能够显式适应模态缺失结构。
+
+
 
 # 实验设计
 
@@ -299,19 +421,3 @@ $$
 2. 这 4 个客户端都具有至少两个本地类别，因此本地测试指标有区分度。
 3. 可以报告每个客户端的 `Accuracy`，并额外给出 `Macro-F1` 作为辅助指标。
 4. 最终主表可对这 4 个客户端取简单平均，作为整体结果。
-
-## Yale 的处理方式
-1. `Yale` 只有一个标签：`brain_metastases`。
-2. 因此 `Yale` 本地测试集上的普通分类准确率没有区分度，不适合作为主结果。
-3. `Yale` 仍然参与联邦训练，因为它提供了有价值的单类知识和域信息。
-4. 但在主结果表中，`Yale` 的本地 `Accuracy` 不作为核心指标，可记为 `N/A` 或不纳入主表平均。
-
-## Yale 贡献的评估方式
-1. 通过消融实验评估 `Yale` 的价值：
-   - `with Yale`
-   - `without Yale`
-2. 重点观察加入 `Yale` 后，其他客户端尤其是包含 `brain_metastases` 类的客户端是否受益。
-3. 最值得关注的是：
-   - `BraTS` 中 `brain_metastases` 相关结果
-   - `Shanghai` 中 `brain_metastases` 相关结果
-4. 这样可以把 `Yale` 定义为“单类知识源客户端”，而不是一个需要单独做可区分本地测试的普通客户端。
