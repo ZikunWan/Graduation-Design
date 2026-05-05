@@ -12,12 +12,14 @@ from server.serverlg import ServerLGFedAvg
 from server.serverlocal import ServerLocal
 from server.serveramm import ServerFedAMM
 from server.servermm import ServerFedMM
+from server.servermfg import ServerFedMFG
 from server.servertgp import ServerFedTGP
 from server.serverfd import ServerFD
 
 ALGO_MAP = {
     "fedamm":    ServerFedAMM,
     "fedmm":     ServerFedMM,
+    "fedmfg":    ServerFedMFG,
     "fedgh":     ServerFedGH,
     "fedproto":  ServerFedProto,
     "lgfedavg":  ServerLGFedAvg,
@@ -66,6 +68,16 @@ def build_arg_parser():
             "[local] Per-client batch size. "
             "Format: ClientName=batch_size, e.g. "
             "BraTS=2 Shanghai=16 Figshare=32 Brisc2025=32"
+        ),
+    )
+    parser.add_argument(
+        "--client_train_max_samples_map",
+        nargs="+",
+        type=str,
+        default=None,
+        help=(
+            "[local] Per-client cap on the number of training samples after the train/val split. "
+            "Format: ClientName=max_train_samples, e.g. BraTS=300"
         ),
     )
     parser.add_argument("--brats_ddp_backend", type=str, default="nccl", choices=["nccl", "gloo"],
@@ -144,6 +156,29 @@ def build_arg_parser():
                         help="[FedMM] Sharpness of the dynamic lambda transition")
     parser.add_argument("--fedmm_t0",             type=float, default=30.0,
                         help="[FedMM] Transition round from CE-emphasis to prototype-emphasis")
+    parser.add_argument("--mfg_proto_lambda",     type=float, default=1.0,
+                        help="[FedMFG] Teacher-prototype alignment loss weight")
+    parser.add_argument("--mfg_head_lambda",      type=float, default=1.0,
+                        help="[FedMFG] Teacher-prototype head-calibration loss weight")
+    parser.add_argument("--mfg_proto_momentum",   type=float, default=0.5,
+                        help="[FedMFG] Momentum for updating the server prototype bank")
+    parser.add_argument("--mfg_proto_tau",        type=float, default=1.0,
+                        help="[FedMFG] Temperature for prototype reliability weighting")
+    parser.add_argument("--mfg_teacher_lambda",   type=float, default=0.5,
+                        help="[FedMFG] Blend ratio between same-combo and more-complete teacher prototypes")
+    parser.add_argument("--mfg_teacher_tau",      type=float, default=1.0,
+                        help="[FedMFG] Temperature for weighting more-complete teacher prototypes")
+    parser.add_argument("--mfg_head_eps",         type=float, default=1e-6,
+                        help="[FedMFG] Small positive constant in row-wise head aggregation")
+    parser.add_argument("--mfg_head_gamma",       type=float, default=1.0,
+                        help="[FedMFG] Exponent on per-class sample counts in head aggregation")
+    parser.add_argument("--mfg_head_tau",         type=float, default=1.0,
+                        help="[FedMFG] Temperature for prototype-consistency weighting in head aggregation")
+    parser.add_argument("--mfg_head_beta",        type=float, default=1.0,
+                        help="[FedMFG] Strength of modality-completeness weighting in head aggregation")
+    parser.add_argument("--mfg_head_weight_mode", type=str, default="rho_eta",
+                        choices=["rho", "rho_eta"],
+                        help="[FedMFG] Unified classifier-head aggregation weight: prototype consistency only, or prototype consistency plus modality completeness")
     parser.add_argument("--margin_threshold",     type=float, default=1.0,
                         help="[FedTGP] Margin threshold for prototype separation")
     parser.add_argument("--early_stopping_patience", type=int, default=5,

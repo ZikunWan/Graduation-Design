@@ -23,6 +23,39 @@ from model import build_client_model
 logger = logging.getLogger(__name__)
 
 
+def _parse_client_positive_int_map(entries, flag_name):
+    mapping = {}
+    for entry in entries or []:
+        if "=" not in entry:
+            raise ValueError(
+                f"Invalid {flag_name} entry '{entry}'. Expected format ClientName=value."
+            )
+        client_name, value_text = entry.split("=", 1)
+        client_name = client_name.strip()
+        if not client_name:
+            raise ValueError(f"Invalid {flag_name} entry '{entry}': empty client name.")
+        try:
+            value = int(value_text.strip())
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid integer '{value_text}' in {flag_name} entry '{entry}'."
+            ) from exc
+        if value <= 0:
+            raise ValueError(
+                f"Invalid integer '{value}' in {flag_name} entry '{entry}': must be > 0."
+            )
+        mapping[client_name] = value
+    return mapping
+
+
+def _limit_subset_length(dataset, max_samples):
+    if max_samples is None or max_samples >= len(dataset):
+        return dataset
+    if isinstance(dataset, Subset):
+        return Subset(dataset.dataset, list(dataset.indices)[:max_samples])
+    return Subset(dataset, list(range(max_samples)))
+
+
 def _find_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -252,6 +285,11 @@ class Client:
         self._threaded_dataloader_warning_emitted = False
 
         max_samples = getattr(args, "max_samples", None)
+        train_max_samples_map = _parse_client_positive_int_map(
+            getattr(args, "client_train_max_samples_map", None),
+            "--client_train_max_samples_map",
+        )
+        train_max_samples = train_max_samples_map.get(self.client_name)
         full_train_dataset = BrainTumorCaseDataset(
             split="train",
             client_name=self.client_name,
@@ -259,6 +297,7 @@ class Client:
             max_samples=max_samples,
         )
         self.train_dataset, self.val_dataset = self._split_train_val_dataset(full_train_dataset)
+        self.train_dataset = _limit_subset_length(self.train_dataset, train_max_samples)
         self.test_dataset = BrainTumorCaseDataset(
             split="test",
             client_name=self.client_name,

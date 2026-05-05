@@ -14,6 +14,7 @@ BASELINE_ALGOS = {"fedgh", "fedproto", "lgfedavg", "fedtgp", "fd", "local"}
 MODALITY_MISSING_BASELINE_ALGOS = {
     "fedamm": "amm",
     "fedmm": "mm",
+    "fedmfg": "mfg",
 }
 
 
@@ -232,6 +233,86 @@ class AMMModel(MMModel):
         return self.amm_unimodal_projection(modality_features)
 
 
+class MFGModel(MMModel):
+    """Modality-aware projected fusion with a shared classifier head."""
+
+    def __init__(
+        self,
+        client_name,
+        num_classes=5,
+        model_name="resnet18",
+        prototype_dim=256,
+        dropout=0.0,
+    ):
+        super().__init__(
+            client_name=client_name,
+            num_classes=num_classes,
+            model_name=model_name,
+            prototype_dim=prototype_dim,
+            dropout=dropout,
+        )
+        embedding_dim = int(prototype_dim)
+        if embedding_dim <= 0:
+            embedding_dim = self.backbone_dim
+        self.embedding_dim = embedding_dim
+        self.modality_projectors = nn.ModuleDict(
+            {
+                modality: nn.Linear(self.backbone_dim, self.embedding_dim)
+                for modality in self.client_modalities
+            }
+        )
+        self.modality_gate = nn.Sequential(
+            nn.Linear(self.embedding_dim, self.embedding_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(self.embedding_dim, 1),
+        )
+        self.classifier = nn.Linear(self.embedding_dim, num_classes)
+
+    def configure_model_parallel(self, devices):
+        super().configure_model_parallel(devices)
+        if self.output_device is None:
+            return
+        for projector in self.modality_projectors.values():
+            projector.to(self.output_device)
+        self.modality_gate.to(self.output_device)
+        self.classifier.to(self.output_device)
+
+    def _project_modality_features(self, modality_features):
+        batch_size = modality_features.shape[0]
+        projected = torch.zeros(
+            batch_size,
+            len(self.modalities),
+            self.embedding_dim,
+            device=modality_features.device,
+            dtype=modality_features.dtype,
+        )
+        for modality in self.client_modalities:
+            modality_index = self.modalities.index(modality)
+            projected[:, modality_index, :] = self.modality_projectors[modality](
+                modality_features[:, modality_index, :]
+            )
+        return projected
+
+    def encode(self, x):
+        modality_features, modality_mask = self.extract_modality_features(x)
+        projected_features = self._project_modality_features(modality_features)
+        gate_logits = self.modality_gate(projected_features).squeeze(-1)
+        active_mask = modality_mask > 0
+        gate_floor = torch.finfo(gate_logits.dtype).min
+        gate_logits = gate_logits.masked_fill(~active_mask, gate_floor)
+        attention = torch.softmax(gate_logits, dim=1)
+        attention = attention * active_mask.to(dtype=attention.dtype)
+        attention = attention / attention.sum(dim=1, keepdim=True).clamp_min(1e-12)
+        fused_feature = torch.sum(projected_features * attention.unsqueeze(-1), dim=1)
+        fused_feature = self.dropout(fused_feature)
+        return {
+            "modality_features": projected_features,
+            "modality_mask": modality_mask,
+            "fused_feature": fused_feature,
+            "attention": attention,
+        }
+
+
 class BaselineBrainTumorModel(nn.Module):
     def __init__(
         self,
@@ -332,6 +413,7 @@ def build_client_model(
         "baseline": BaselineBrainTumorModel,
         "amm": AMMModel,
         "mm": MMModel,
+        "mfg": MFGModel,
     }
     if resolved_mode not in model_classes:
         raise ValueError(
