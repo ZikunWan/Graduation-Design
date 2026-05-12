@@ -23,10 +23,11 @@ python train.py \
     --save_gap      1 \
     --save_total_limit 2 \
     --save_dir      checkpoints/fedmfg \
+    --resume        checkpoints/fedmfg/checkpoint_round_5.pth \
     --algo          fedmfg \
     --client_gpu_map "BraTS=4,5,6,7" "Shanghai=2,3" Figshare=0 Brisc2025=1 \
-    --mfg_proto_lambda   1.0 \
-    --mfg_head_lambda    1.0 \
+    --mfg_proto_lambda   0.1 \
+    --mfg_head_lambda    0.1 \
     --mfg_proto_momentum 0.5 \
     --mfg_proto_tau      1.0 \
     --mfg_teacher_lambda 0.5 \
@@ -35,6 +36,7 @@ python train.py \
     --mfg_head_gamma     1.0 \
     --mfg_head_tau       1.0 \
     --mfg_head_beta      1.0 \
+    --mfg_head_weight_mode rho \
     --server_early_stopping_patience 10 \
     --server_early_stopping_min_delta 0.0 \
     --num_workers 8 \
