@@ -166,7 +166,7 @@
 本文方法主要改进三处：
 1. 特征融合：不再简单拼接不同模态特征，而是让模型自动判断当前样本更应该依赖哪些模态。
 2. Prototype 传递：单模态客户端不仅学习自己的单模态 prototype，也可以从更完整的多模态 prototype 中获得监督。
-3. 分类头聚合：不再简单平均分类头，而是让样本更多、prototype 更可靠、模态更完整的客户端拥有更高权重。
+3. 分类头聚合：不再简单平均分类头，而是根据客户端本地 prototype 与全局 prototype 的一致性，为整个分类头分配不同聚合权重。
 
 ### 主要符号
 为避免后文公式过长，先约定几个符号：
@@ -306,69 +306,46 @@ $$
 
 由于前面的 fusion 已经把所有客户端的融合特征统一到维度 $D$，所以不同客户端的分类头形状一致，可以进行参数交换。
 
-`LG-FedAvg` 是直接平均分类头。本文希望更细一些：不同客户端对不同类别的可靠性不一样，所以分类头按类别逐行聚合：
+`LG-FedAvg` 是直接平均分类头。当前实现比它更细一些：服务器先根据每个客户端上传的 prototype 计算一个可靠性分数，再用这个分数对整个分类头做加权平均：
 
 $$
-W_c^{t+1}=\sum_{k\in\mathcal{K}_c}\pi_{k,c}W_{k,c}^{t+1}
+W^{t+1}=\sum_{k\in\mathcal{K}}\alpha_k W_k^{t+1}
 $$
 
 $$
-b_c^{t+1}=\sum_{k\in\mathcal{K}_c}\pi_{k,c}b_{k,c}^{t+1}
+b^{t+1}=\sum_{k\in\mathcal{K}}\alpha_k b_k^{t+1}
 $$
 
-其中 $W_{k,c}$ 和 $b_{k,c}$ 是客户端 $k$ 分类头中对应类别 $c$ 的那一行参数，$\pi_{k,c}$ 是它在这个类别上的聚合权重。
+其中 $W_k,b_k$ 是客户端 $k$ 的整个线性分类头，$\alpha_k$ 是客户端 $k$ 在本轮通信中的聚合权重。也就是说，当前代码不是“每个类别单独聚合一行”，而是“先给每个客户端一个标量权重，再用它聚合整个 head”。
 
-权重主要看三个因素：
-1. 这个客户端上该类别的样本多不多。
-2. 这个客户端的 prototype 和全局 prototype 是否接近。
-3. 这个客户端在该类别上是否拥有更完整的模态。
-
-对应的权重可以写成：
+权重的核心来自 prototype 一致性。先定义客户端 $k$ 的可靠性分数：
 
 $$
-r_{k,c}
+r_k=\exp(\rho_k/\tau_h)
+$$
+
+$$
+\alpha_k
 =
-(n_{k,c}+\epsilon)^\gamma
-\cdot
-\exp(\rho_{k,c}/\tau_h)
-\cdot
-(1+\beta\eta_{k,c})
+\frac{r_k}
+{\sum_{j\in\mathcal{K}}r_j}
 $$
 
-$$
-\pi_{k,c}
-=
-\frac{r_{k,c}}
-{\sum_{j\in\mathcal{K}_c}r_{j,c}}
-$$
-
-这里 $n_{k,c}$ 是类别样本数，$\rho_{k,c}$ 表示 prototype 一致性，$\eta_{k,c}$ 表示模态完整度。$\epsilon,\gamma,\tau_h,\beta$ 都是超参数，用来控制各部分权重的强弱。
+这里 $\rho_k$ 表示客户端 $k$ 的 prototype 一致性，$\tau_h$ 是控制权重平滑程度的温度参数。
 
 其中：
 
 $$
-\rho_{k,c}
+\rho_k
 =
 \frac{
-\sum_s n_{k,s,c}\cos(p_{k,s,c},G_{s,c})
+ \sum_{s,c} n_{k,s,c}\cos(p_{k,s,c},G_{s,c})
 }{
-\sum_s n_{k,s,c}
+ \sum_{s,c} n_{k,s,c}
 }
 $$
 
-它表示客户端 $k$ 在类别 $c$ 上的 prototype 平均有多接近全局 prototype。
-
-$$
-\eta_{k,c}
-=
-\frac{
-\sum_s n_{k,s,c}|s|/M
-}{
-\sum_s n_{k,s,c}
-}
-$$
-
-它表示客户端 $k$ 在类别 $c$ 上平均拥有多少比例的模态。最终效果是：如果某个客户端在某类上样本更多、特征更稳定、模态更完整，那么它对该类分类头的贡献就更大。
+其中 $n_{k,s,c}$ 是客户端 $k$ 上模态组合 $s$、类别 $c$ 的样本数。这个公式表示：先在每个 `(modality_combination, class)` 上计算本地 prototype 与全局 prototype 的余弦相似度，再用对应样本数做加权平均，得到客户端级别的总体一致性分数。最终效果是：如果某个客户端上传的 prototype 整体上更接近全局 prototype，那么它的整个分类头在聚合时权重就更大。
 
 ### 训练目标
 客户端本地训练只保留三类损失，避免方法过于复杂：
@@ -418,10 +395,10 @@ $$
 1. 服务器向客户端下发当前全局分类头和 prototype bank。
 2. 客户端使用本地可用模态训练私有 encoder、gated fusion 模块和线性分类头。
 3. 客户端统计本地 `(modality_combination, class)` prototype，并上传 prototype、样本计数和分类头参数。
-4. 服务器先更新 prototype bank，再基于 prototype 可靠性与模态完整度聚合分类头。
+4. 服务器先更新 prototype bank，再基于客户端 prototype 与全局 prototype 的一致性聚合分类头。
 5. 更新后的 prototype bank 和分类头进入下一轮训练。
 
-总结来说，本文方法可以理解为：在 `FedAMM` 的模态组合 prototype 基础上，加入 `LG-FedAvg` 中被证明有效的分类头共享；但分类头不是简单平均，而是由 prototype 和模态完整度来决定每个客户端在每个类别上的贡献。
+总结来说，本文方法可以理解为：在 `FedAMM` 的模态组合 prototype 基础上，加入 `LG-FedAvg` 中被证明有效的分类头共享；但分类头不是简单平均，而是由客户端 prototype 与全局 prototype 的一致性来决定每个客户端对整个分类头的贡献。
 
 
 

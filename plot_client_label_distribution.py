@@ -3,8 +3,12 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import pandas as pd
+from matplotlib.font_manager import FontProperties
 from matplotlib.ticker import FuncFormatter
 
+
+CHINESE_FONT = "SimSun"
+NUMBER_FONT = "Times New Roman"
 
 # NPG-inspired palette (muted, publication-friendly)
 NATURE_COLORS = [
@@ -38,7 +42,13 @@ def parse_args() -> argparse.Namespace:
         "--manifest",
         type=Path,
         default=None,
-        help="Path to split_manifest.csv. If omitted, script auto-detects common locations.",
+        help="Path to split_manifest.csv. If omitted, scan --root_dir.",
+    )
+    parser.add_argument(
+        "--root_dir",
+        type=Path,
+        default=Path("/data/zikun_workspace/preprocessed"),
+        help="Root directory for preprocessed datasets when --manifest is omitted.",
     )
     parser.add_argument(
         "--split",
@@ -50,13 +60,7 @@ def parse_args() -> argparse.Namespace:
         "--output",
         type=Path,
         default=None,
-        help="Output image path (.png). Default: same folder as manifest.",
-    )
-    parser.add_argument(
-        "--output-pdf",
-        type=Path,
-        default=None,
-        help="Output PDF path. Default: same folder as manifest.",
+        help="Output image path (.png). Default: same folder as manifest or current folder.",
     )
     parser.add_argument(
         "--title",
@@ -85,18 +89,56 @@ def resolve_manifest(manifest: Path | None) -> Path:
     )
 
 
+def load_manifest_dataframe(manifest: Path | None, root_dir: Path, split: str) -> pd.DataFrame:
+    if manifest is not None:
+        df = pd.read_csv(manifest)
+        required = {"dataset", "split", "label", "sample_id"}
+        missing = required - set(df.columns)
+        if missing:
+            raise ValueError(f"Manifest missing columns: {sorted(missing)}")
+        return df
+
+    rows = []
+    splits = ["train", "test"] if split == "all" else [split]
+    for dataset_dir in sorted(root_dir.iterdir()):
+        if not dataset_dir.is_dir():
+            continue
+        dataset = dataset_dir.name
+        for split_name in splits:
+            split_dir = dataset_dir / split_name
+            if not split_dir.is_dir():
+                continue
+            for label_dir in sorted(split_dir.iterdir()):
+                if not label_dir.is_dir():
+                    continue
+                for sample_dir in sorted(label_dir.iterdir()):
+                    if sample_dir.is_dir():
+                        rows.append(
+                            {
+                                "dataset": dataset,
+                                "split": split_name,
+                                "label": label_dir.name,
+                                "sample_id": sample_dir.name,
+                            }
+                        )
+    return pd.DataFrame(rows, columns=["dataset", "split", "label", "sample_id"])
+
+
 def set_nature_style() -> None:
     # Reset first to avoid inheriting environment/global styles.
     plt.rcdefaults()
     plt.rcParams.update(
         {
-            "font.family": "sans-serif",
-            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "font.family": CHINESE_FONT,
+            "axes.unicode_minus": False,
             "axes.linewidth": 1.0,
             "axes.edgecolor": "#2B2B2B",
             "axes.facecolor": "#FFFFFF",
             "figure.facecolor": "#FFFFFF",
             "savefig.facecolor": "#FFFFFF",
+            "font.weight": "bold",
+            "axes.labelweight": "bold",
+            "axes.titleweight": "bold",
             "axes.labelsize": 12,
             "axes.titlesize": 13,
             "xtick.labelsize": 10.5,
@@ -116,23 +158,30 @@ def set_nature_style() -> None:
 
 
 def pretty_label(label: str) -> str:
-    return label.replace("_", " ")
+    label_names = {
+        "glioma": "胶质瘤",
+        "meningioma": "脑膜瘤",
+        "pituitary": "垂体瘤",
+        "brain_metastases": "脑转移瘤",
+        "no_tumor": "无肿瘤",
+    }
+    return label_names.get(label, label.replace("_", " "))
 
 
 def main() -> None:
     args = parse_args()
-    manifest = resolve_manifest(args.manifest)
-    output_png = args.output or manifest.parent / "client_label_distribution.png"
-    output_pdf = args.output_pdf or manifest.parent / "client_label_distribution.pdf"
+    manifest = resolve_manifest(args.manifest) if args.manifest is not None else None
+    output_png = args.output or (
+        manifest.parent / "client_label_distribution.png"
+        if manifest is not None
+        else Path("client_label_distribution.png")
+    )
 
-    df = pd.read_csv(manifest)
-    required = {"dataset", "split", "label", "sample_id"}
-    missing = required - set(df.columns)
-    if missing:
-        raise ValueError(f"Manifest missing columns: {sorted(missing)}")
-
+    df = load_manifest_dataframe(manifest, args.root_dir, args.split)
     if args.split != "all":
         df = df[df["split"] == args.split].copy()
+
+    df = df[df["dataset"] != "Yale"].copy()
 
     # Ensure one sample counts once
     df = df.drop_duplicates(subset=["dataset", "split", "label", "sample_id"])
@@ -148,7 +197,7 @@ def main() -> None:
     )
 
     # Fixed client order for readability and consistency.
-    preferred_client_order = ["BraTS", "Brisc2025", "Figshare", "Shanghai", "Yale"]
+    preferred_client_order = ["BraTS", "Brisc2025", "Figshare", "Shanghai"]
     present_clients = list(table.index)
     ordered_clients = [c for c in preferred_client_order if c in present_clients] + [
         c for c in present_clients if c not in preferred_client_order
@@ -161,6 +210,9 @@ def main() -> None:
 
     set_nature_style()
     fig, ax = plt.subplots(figsize=(8.0, 5.2), dpi=300)
+    chinese_font = FontProperties(family=CHINESE_FONT, weight="bold")
+    legend_font = FontProperties(family=CHINESE_FONT, weight="bold", size=10.0)
+    number_font = FontProperties(family=NUMBER_FONT, weight="bold")
 
     bottom = None
     x = list(range(len(table.index)))
@@ -188,12 +240,16 @@ def main() -> None:
         bottom = y if bottom is None else bottom + y
 
     ax.set_xlabel("")
-    ax.set_ylabel("Sample Count")
+    ax.set_ylabel("样本数量", fontproperties=chinese_font)
     if args.title.strip():
-        ax.set_title(args.title.strip(), pad=6)
+        ax.set_title(args.title.strip(), pad=6, fontproperties=chinese_font)
     ax.set_xticks(list(x))
     ax.set_xticklabels(table.index, rotation=0)
     ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f"{int(y):,}"))
+    for tick_label in ax.get_xticklabels():
+        tick_label.set_fontproperties(chinese_font)
+    for tick_label in ax.get_yticklabels():
+        tick_label.set_fontproperties(number_font)
 
     for spine in ["top", "right"]:
         ax.spines[spine].set_visible(False)
@@ -208,7 +264,7 @@ def main() -> None:
         loc="upper center",
         bbox_to_anchor=(0.5, 0.92),
         ncol=min(5, len(table.columns)),
-        fontsize=10.0,
+        prop=legend_font,
         title=None,
         handlelength=1.5,
         columnspacing=1.2,
@@ -218,10 +274,7 @@ def main() -> None:
     fig.subplots_adjust(top=0.86, left=0.10, right=0.99, bottom=0.13)
     output_png.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(output_png, bbox_inches="tight", dpi=400)
-    output_pdf.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(output_pdf, bbox_inches="tight")
     print(f"Saved PNG: {output_png}")
-    print(f"Saved PDF: {output_pdf}")
 
 
 if __name__ == "__main__":
