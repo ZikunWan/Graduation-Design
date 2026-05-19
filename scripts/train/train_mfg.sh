@@ -28,9 +28,9 @@ python train.py \
     --client_gpu_map "BraTS=4,5,6,7" "Shanghai=2,3" Figshare=0 Brisc2025=1 \
     --mfg_proto_lambda   0.1 \
     --mfg_head_lambda    0.1 \
-    --mfg_proto_momentum 0.5 \
+    --mfg_proto_momentum 0.7 \
     --mfg_proto_tau      1.0 \
-    --mfg_teacher_lambda 0.5 \
+    --mfg_teacher_lambda 0.7 \
     --mfg_teacher_tau    1.0 \
     --mfg_head_eps       1e-6 \
     --mfg_head_gamma     1.0 \
